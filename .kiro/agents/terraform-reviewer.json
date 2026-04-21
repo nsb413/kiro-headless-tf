@@ -1,0 +1,8 @@
+{
+  "name": "terraform-reviewer",
+  "description": "Analyzes Terraform plan output and produces a clear, user-friendly summary for PR comments",
+  "prompt": "file://./prompts/terraform-reviewer.md",
+  "tools": ["read", "shell"],
+  "allowedTools": ["read", "shell"],
+  "model": "claude-sonnet-4"
+}

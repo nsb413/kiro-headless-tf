@@ -1,0 +1,133 @@
+name: Terraform Plan
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - "**.tf"
+      - "**.tfvars"
+      - ".github/workflows/terraform-plan.yml"
+
+permissions:
+  contents: read
+  pull-requests: write
+  id-token: write
+
+env:
+  TF_WORKING_DIR: "terraform"
+  AWS_REGION: "us-west-2"
+  IAM_ROLE_ARN: "arn:aws:iam::448479419844:role/github-actions-kiro-headless-tf"                         # Set after deploying cloudformation/github-oidc-terraform.yml (see RoleArn output)
+
+jobs:
+  terraform-plan:
+    name: Plan & Summarize
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ env.IAM_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_wrapper: false
+          # terraform_version: "1.9.0"  # Pin a specific version if needed
+
+      - name: Terraform Init
+        working-directory: ${{ env.TF_WORKING_DIR }}
+        run: terraform init -input=false
+
+      - name: Terraform Plan
+        id: plan
+        working-directory: ${{ env.TF_WORKING_DIR }}
+        run: |
+          set +e
+          terraform plan -input=false -no-color -out=tfplan 2>&1 | tee plan_output.txt
+          PLAN_EXIT_CODE=${PIPESTATUS[0]}
+          echo "exit_code=$PLAN_EXIT_CODE" >> "$GITHUB_OUTPUT"
+          set -e
+
+          # Generate the human-readable plan text for Kiro
+          if [ $PLAN_EXIT_CODE -eq 0 ]; then
+            terraform show -no-color tfplan > plan_readable.txt
+          else
+            cp plan_output.txt plan_readable.txt
+          fi
+        env:
+          TF_IN_AUTOMATION: "true"
+
+      - name: Install Kiro CLI
+        run: curl -fsSL https://cli.kiro.dev/install | bash
+
+      - name: Generate Plan Summary with Kiro
+        id: summary
+        working-directory: ${{ env.TF_WORKING_DIR }}
+        env:
+          KIRO_API_KEY: ${{ secrets.KIRO_API_KEY }}
+          NO_COLOR: "1"
+        run: |
+          PLAN_FILE="plan_readable.txt"
+
+          # Run Kiro in headless mode and capture output
+          # NO_COLOR=1 disables color output, sed strips any remaining ANSI codes
+          kiro-cli chat \
+            --agent terraform-reviewer \
+            --no-interactive \
+            --trust-tools=read,shell \
+            "Read the file '$PLAN_FILE' and produce a Terraform plan summary. Output ONLY the markdown summary, nothing else." \
+            2>/dev/null | sed 's/\x1b\[[0-9;]*m//g' > raw_output.txt
+
+          # Extract just the markdown summary (everything from the first "##" or "###" heading onward)
+          sed -n '/^#/,$p' raw_output.txt > summary.md
+
+          # Fallback: if no markdown headings found, use the full cleaned output
+          if [ ! -s summary.md ]; then
+            cp raw_output.txt summary.md
+          fi
+
+      - name: Comment on PR
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const fs = require('fs');
+            const summary = fs.readFileSync('${{ env.TF_WORKING_DIR }}/summary.md', 'utf8');
+            const planExitCode = '${{ steps.plan.outputs.exit_code }}';
+
+            const marker = '<!-- kiro-terraform-plan -->';
+            const body = `${marker}\n${summary}`;
+
+            // Find existing comment to update (avoids duplicate comments on re-runs)
+            const { data: comments } = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+            });
+
+            const existing = comments.find(c => c.body.includes(marker));
+
+            if (existing) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: existing.id,
+                body,
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                body,
+              });
+            }
+
+      - name: Fail if plan failed
+        if: steps.plan.outputs.exit_code != '0'
+        run: exit 1
