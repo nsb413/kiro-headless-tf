@@ -70,17 +70,26 @@ jobs:
         working-directory: ${{ env.TF_WORKING_DIR }}
         env:
           KIRO_API_KEY: ${{ secrets.KIRO_API_KEY }}
+          NO_COLOR: "1"
         run: |
           PLAN_FILE="plan_readable.txt"
 
-          SUMMARY=$(kiro-cli chat \
+          # Run Kiro in headless mode and capture output
+          # NO_COLOR=1 disables color output, sed strips any remaining ANSI codes
+          kiro-cli chat \
             --agent terraform-reviewer \
             --no-interactive \
             --trust-tools=read,shell \
-            "Read the file '$PLAN_FILE' and produce a Terraform plan summary.")
+            "Read the file '$PLAN_FILE' and produce a Terraform plan summary. Output ONLY the markdown summary, nothing else." \
+            2>/dev/null | sed 's/\x1b\[[0-9;]*m//g' > raw_output.txt
 
-          # Write summary to file (handles multi-line safely)
-          echo "$SUMMARY" > summary.md
+          # Extract just the markdown summary (everything from the first "##" or "###" heading onward)
+          sed -n '/^#/,$p' raw_output.txt > summary.md
+
+          # Fallback: if no markdown headings found, use the full cleaned output
+          if [ ! -s summary.md ]; then
+            cp raw_output.txt summary.md
+          fi
 
       - name: Comment on PR
         uses: actions/github-script@v7
