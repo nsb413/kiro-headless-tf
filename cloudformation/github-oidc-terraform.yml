@@ -1,0 +1,230 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  GitHub Actions OIDC provider, IAM role for Terraform, and S3 backend bucket
+  with S3-native state locking (use_lockfile) for the nsb413/kiro-headless-tf repository.
+
+Parameters:
+  GitHubOrg:
+    Type: String
+    Default: nsb413
+    Description: GitHub organization or username
+
+  GitHubRepo:
+    Type: String
+    Default: kiro-headless-tf
+    Description: GitHub repository name
+
+  TerraformStateBucketName:
+    Type: String
+    Default: nsb413-kiro-headless-tf-state
+    Description: Name for the S3 bucket that stores Terraform state
+
+  TerraformStateKey:
+    Type: String
+    Default: terraform.tfstate
+    Description: S3 object key for the Terraform state file
+
+Conditions:
+  # Only create the OIDC provider if one doesn't already exist in the account.
+  # Set to "false" if you've already created the provider for another repo.
+  CreateOIDCProvider: !Equals ["true", "true"]
+
+Resources:
+  # ---------------------------------------------------------------
+  # GitHub OIDC Identity Provider
+  # ---------------------------------------------------------------
+  GitHubOIDCProvider:
+    Type: AWS::IAM::OIDCProvider
+    Condition: CreateOIDCProvider
+    Properties:
+      Url: https://token.actions.githubusercontent.com
+      ClientIdList:
+        - sts.amazonaws.com
+      ThumbprintList:
+        - 6938fd4d98bab03faadb97b34396831e3780aea1
+        - 1c58a3a8518e8759bf075b76b750d4f2df264fcd
+
+  # ---------------------------------------------------------------
+  # IAM Role assumed by GitHub Actions via OIDC
+  # ---------------------------------------------------------------
+  GitHubActionsRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub github-actions-${GitHubRepo}
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Federated: !If
+                - CreateOIDCProvider
+                - !Ref GitHubOIDCProvider
+                - !Sub arn:aws:iam::${AWS::AccountId}:oidc-provider/token.actions.githubusercontent.com
+            Action: sts:AssumeRoleWithWebIdentity
+            Condition:
+              StringEquals:
+                token.actions.githubusercontent.com:aud: sts.amazonaws.com
+              StringLike:
+                token.actions.githubusercontent.com:sub: !Sub repo:${GitHubOrg}/${GitHubRepo}:*
+      MaxSessionDuration: 3600
+      Tags:
+        - Key: Purpose
+          Value: GitHubActionsTerraform
+
+  # ---------------------------------------------------------------
+  # Policy: Terraform state backend access (S3 + lockfile)
+  # Uses S3-native locking (use_lockfile = true) instead of
+  # deprecated DynamoDB locking. The lock file is stored at
+  # <key>.tflock in the same bucket.
+  # See: https://developer.hashicorp.com/terraform/language/backend/s3#state-locking
+  # ---------------------------------------------------------------
+  TerraformBackendPolicy:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyName: TerraformBackendAccess
+      Roles:
+        - !Ref GitHubActionsRole
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: S3ListBucket
+            Effect: Allow
+            Action:
+              - s3:ListBucket
+            Resource:
+              - !GetAtt TerraformStateBucket.Arn
+          - Sid: S3StateFile
+            Effect: Allow
+            Action:
+              - s3:GetObject
+              - s3:PutObject
+            Resource:
+              - !Sub "${TerraformStateBucket.Arn}/${TerraformStateKey}"
+          - Sid: S3LockFile
+            Effect: Allow
+            Action:
+              - s3:GetObject
+              - s3:PutObject
+              - s3:DeleteObject
+            Resource:
+              - !Sub "${TerraformStateBucket.Arn}/${TerraformStateKey}.tflock"
+
+  # ---------------------------------------------------------------
+  # Policy: Terraform infrastructure provisioning
+  # Scope this down to only the services your Terraform manages.
+  # ---------------------------------------------------------------
+  TerraformProvisioningPolicy:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyName: TerraformProvisioning
+      Roles:
+        - !Ref GitHubActionsRole
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: TerraformProvisioning
+            Effect: Allow
+            Action:
+              - ec2:*
+              - s3:*
+              - rds:*
+              - lambda:*
+              - iam:Get*
+              - iam:List*
+              - iam:PassRole
+              - iam:CreateRole
+              - iam:DeleteRole
+              - iam:AttachRolePolicy
+              - iam:DetachRolePolicy
+              - iam:PutRolePolicy
+              - iam:DeleteRolePolicy
+              - iam:CreatePolicy
+              - iam:DeletePolicy
+              - iam:CreateInstanceProfile
+              - iam:DeleteInstanceProfile
+              - iam:AddRoleToInstanceProfile
+              - iam:RemoveRoleFromInstanceProfile
+              - sts:GetCallerIdentity
+              - logs:*
+              - cloudwatch:*
+              - sns:*
+              - sqs:*
+              - dynamodb:*
+              - elasticloadbalancing:*
+              - autoscaling:*
+              - route53:*
+              - acm:*
+              - cloudfront:*
+              - kms:*
+            Resource: "*"
+            # TODO: Tighten Resource scope per service for production use
+
+  # ---------------------------------------------------------------
+  # S3 Bucket for Terraform State
+  # ---------------------------------------------------------------
+  TerraformStateBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BucketName: !Ref TerraformStateBucketName
+      VersioningConfiguration:
+        Status: Enabled
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      LifecycleConfiguration:
+        Rules:
+          - Id: CleanupOldVersions
+            Status: Enabled
+            NoncurrentVersionExpiration:
+              NoncurrentDays: 90
+      Tags:
+        - Key: Purpose
+          Value: TerraformState
+
+  TerraformStateBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref TerraformStateBucket
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: DenyInsecureTransport
+            Effect: Deny
+            Principal: "*"
+            Action: s3:*
+            Resource:
+              - !GetAtt TerraformStateBucket.Arn
+              - !Sub "${TerraformStateBucket.Arn}/*"
+            Condition:
+              Bool:
+                aws:SecureTransport: "false"
+
+Outputs:
+  RoleArn:
+    Description: IAM Role ARN for GitHub Actions — set this as IAM_ROLE_ARN in your workflows
+    Value: !GetAtt GitHubActionsRole.Arn
+
+  StateBucketName:
+    Description: S3 bucket name for Terraform state backend
+    Value: !Ref TerraformStateBucket
+
+  TerraformBackendConfig:
+    Description: Paste this into your Terraform backend configuration
+    Value: !Sub |
+      terraform {
+        backend "s3" {
+          bucket       = "${TerraformStateBucketName}"
+          key          = "${TerraformStateKey}"
+          region       = "${AWS::Region}"
+          use_lockfile = true
+          encrypt      = true
+        }
+      }

@@ -1,0 +1,49 @@
+name: Terraform Apply
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "**.tf"
+      - "**.tfvars"
+
+permissions:
+  contents: read
+  id-token: write
+
+env:
+  TF_WORKING_DIR: "terraform"
+  AWS_REGION: "us-west-2"
+  IAM_ROLE_ARN: "arn:aws:iam::448479419844:role/github-actions-kiro-headless-tf"                         # Set after deploying cloudformation/github-oidc-terraform.yml (see RoleArn output)
+
+jobs:
+  terraform-apply:
+    name: Apply
+    runs-on: ubuntu-latest
+    environment: production  # Requires environment approval in GitHub settings
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ env.IAM_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_wrapper: false
+          # terraform_version: "1.9.0"
+
+      - name: Terraform Init
+        working-directory: ${{ env.TF_WORKING_DIR }}
+        run: terraform init -input=false
+
+      - name: Terraform Apply
+        working-directory: ${{ env.TF_WORKING_DIR }}
+        run: terraform apply -input=false -auto-approve
+        env:
+          TF_IN_AUTOMATION: "true"
