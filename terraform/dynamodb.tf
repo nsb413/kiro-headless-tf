@@ -13,6 +13,7 @@ resource "aws_dynamodb_table" "books" {
   }
 
   tags = {
-    Name = "${var.project_name}-books-${var.environment}"
+    Name        = "${var.project_name}-books-${var.environment}"
+    ManagedBy   = "terraform"
   }
 }
