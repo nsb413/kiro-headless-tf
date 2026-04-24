@@ -203,12 +203,17 @@ Resources:
               - !Sub "arn:aws:iam::${AWS::AccountId}:role/${ProjectName}-*"
 
           # --- CloudWatch Logs ---
+          - Sid: CloudWatchLogsDescribe
+            Effect: Allow
+            Action:
+              - logs:DescribeLogGroups
+            Resource:
+              - !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:*"
           - Sid: CloudWatchLogs
             Effect: Allow
             Action:
               - logs:CreateLogGroup
               - logs:DeleteLogGroup
-              - logs:DescribeLogGroups
               - logs:ListTagsForResource
               - logs:ListTagsLogGroup
               - logs:PutRetentionPolicy
