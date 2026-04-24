@@ -24,6 +24,11 @@ Parameters:
     Default: terraform.tfstate
     Description: S3 object key for the Terraform state file
 
+  ProjectName:
+    Type: String
+    Default: kiro-headless-tf
+    Description: Project name prefix used in Terraform resource naming
+
 Conditions:
   # Only create the OIDC provider if one doesn't already exist in the account.
   # Set to "false" if you've already created the provider for another repo.
@@ -111,7 +116,8 @@ Resources:
 
   # ---------------------------------------------------------------
   # Policy: Terraform infrastructure provisioning
-  # Scope this down to only the services your Terraform manages.
+  # Scoped to the exact services/actions needed by the Terraform
+  # templates (API Gateway, Lambda, DynamoDB, IAM, CloudWatch Logs).
   # ---------------------------------------------------------------
   TerraformProvisioningPolicy:
     Type: AWS::IAM::Policy
@@ -122,42 +128,105 @@ Resources:
       PolicyDocument:
         Version: "2012-10-17"
         Statement:
-          - Sid: TerraformProvisioning
+          # --- DynamoDB ---
+          - Sid: DynamoDB
             Effect: Allow
             Action:
-              - ec2:*
-              - s3:*
-              - rds:*
-              - lambda:*
-              - iam:Get*
-              - iam:List*
-              - iam:PassRole
+              - dynamodb:CreateTable
+              - dynamodb:DeleteTable
+              - dynamodb:DescribeTable
+              - dynamodb:DescribeContinuousBackups
+              - dynamodb:DescribeTimeToLive
+              - dynamodb:ListTagsOfResource
+              - dynamodb:TagResource
+              - dynamodb:UntagResource
+              - dynamodb:UpdateTable
+              - dynamodb:UpdateContinuousBackups
+              - dynamodb:UpdateTimeToLive
+            Resource:
+              - !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${ProjectName}-*"
+
+          # --- Lambda ---
+          - Sid: Lambda
+            Effect: Allow
+            Action:
+              - lambda:CreateFunction
+              - lambda:DeleteFunction
+              - lambda:GetFunction
+              - lambda:GetFunctionCodeSigningConfig
+              - lambda:GetPolicy
+              - lambda:ListVersionsByFunction
+              - lambda:UpdateFunctionCode
+              - lambda:UpdateFunctionConfiguration
+              - lambda:AddPermission
+              - lambda:RemovePermission
+              - lambda:TagResource
+              - lambda:UntagResource
+              - lambda:ListTags
+            Resource:
+              - !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:${ProjectName}-*"
+
+          # --- API Gateway v2 (HTTP API) ---
+          - Sid: ApiGateway
+            Effect: Allow
+            Action:
+              - apigateway:POST
+              - apigateway:GET
+              - apigateway:PATCH
+              - apigateway:DELETE
+              - apigateway:PUT
+            Resource:
+              - !Sub "arn:aws:apigateway:${AWS::Region}::/apis*"
+              - !Sub "arn:aws:apigateway:${AWS::Region}::/tags*"
+
+          # --- IAM (for Lambda execution role) ---
+          - Sid: IAMRoles
+            Effect: Allow
+            Action:
               - iam:CreateRole
               - iam:DeleteRole
+              - iam:GetRole
+              - iam:UpdateRole
+              - iam:TagRole
+              - iam:UntagRole
+              - iam:ListRoleTags
+              - iam:ListInstanceProfilesForRole
+              - iam:ListAttachedRolePolicies
+              - iam:ListRolePolicies
+              - iam:PassRole
+              - iam:PutRolePolicy
+              - iam:GetRolePolicy
+              - iam:DeleteRolePolicy
               - iam:AttachRolePolicy
               - iam:DetachRolePolicy
-              - iam:PutRolePolicy
-              - iam:DeleteRolePolicy
-              - iam:CreatePolicy
-              - iam:DeletePolicy
-              - iam:CreateInstanceProfile
-              - iam:DeleteInstanceProfile
-              - iam:AddRoleToInstanceProfile
-              - iam:RemoveRoleFromInstanceProfile
+            Resource:
+              - !Sub "arn:aws:iam::${AWS::AccountId}:role/${ProjectName}-*"
+
+          # --- CloudWatch Logs ---
+          - Sid: CloudWatchLogs
+            Effect: Allow
+            Action:
+              - logs:CreateLogGroup
+              - logs:DeleteLogGroup
+              - logs:DescribeLogGroups
+              - logs:ListTagsForResource
+              - logs:ListTagsLogGroup
+              - logs:PutRetentionPolicy
+              - logs:DeleteRetentionPolicy
+              - logs:TagResource
+              - logs:UntagResource
+              - logs:TagLogGroup
+              - logs:UntagLogGroup
+            Resource:
+              - !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/${ProjectName}-*"
+              - !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/apigateway/${ProjectName}-*"
+
+          # --- STS (used by Terraform to verify identity) ---
+          - Sid: STS
+            Effect: Allow
+            Action:
               - sts:GetCallerIdentity
-              - logs:*
-              - cloudwatch:*
-              - sns:*
-              - sqs:*
-              - dynamodb:*
-              - elasticloadbalancing:*
-              - autoscaling:*
-              - route53:*
-              - acm:*
-              - cloudfront:*
-              - kms:*
             Resource: "*"
-            # TODO: Tighten Resource scope per service for production use
 
   # ---------------------------------------------------------------
   # S3 Bucket for Terraform State
