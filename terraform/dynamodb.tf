@@ -8,6 +8,17 @@ resource "aws_dynamodb_table" "books" {
     type = "S"
   }
 
+  attribute {
+    name = "author"
+    type = "S"
+  }
+
+  global_secondary_index {
+    name            = "author-index"
+    hash_key        = "author"
+    projection_type = "ALL"
+  }
+
   ttl {
     attribute_name = "expires_at"
     enabled        = true

@@ -22,3 +22,8 @@ output "dynamodb_table_arn" {
   description = "DynamoDB table ARN"
   value       = aws_dynamodb_table.books.arn
 }
+
+output "dynamodb_author_index_name" {
+  description = "DynamoDB GSI for querying books by author"
+  value       = "author-index"
+}
